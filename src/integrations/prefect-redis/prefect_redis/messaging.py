@@ -217,14 +217,14 @@ class Consumer(_Consumer):
         name: Optional[str] = None,
         group: Optional[str] = None,
         block: timedelta = timedelta(seconds=1),
-        min_idle_time: timedelta = timedelta(seconds=0),
+        min_idle_time: timedelta = timedelta(seconds=30),
         should_process_pending_messages: bool = True,
         starting_message_id: str = "0",
         automatically_acknowledge: bool = True,
         max_retries: int = 3,
         trim_every: timedelta = timedelta(seconds=60),
     ):
-        self.name = name or topic
+        self.name = name or f"{topic}-{socket.gethostname()}-{uuid.uuid4().hex}" # Generate unique consumer name
         self.stream = topic  # Use topic as stream name
         self.group = group or topic  # Use topic as default group name
         self.block = block
