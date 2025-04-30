@@ -1102,6 +1102,10 @@ async def proactive_evaluation(
 
 
 async def evaluate_proactive_triggers() -> None:
+    async with automations_session() as session:
+        async with _automations_lock():
+            await load_automations(session)
+
     for trigger in triggers.values():
         if trigger.posture != Posture.Proactive:
             continue
