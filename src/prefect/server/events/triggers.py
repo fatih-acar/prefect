@@ -649,7 +649,7 @@ def _automations_lock() -> asyncio.Lock:
 
 def find_interested_triggers(event: ReceivedEvent) -> Collection[EventTrigger]:
     candidates = triggers.values()
-    return [trigger for trigger in candidates if trigger.covers(event)]
+    return [trigger for trigger in candidates if trigger.covers(event) and trigger._automation()]
 
 
 def load_automation(automation: Optional[Automation]) -> None:
@@ -1102,6 +1102,10 @@ async def proactive_evaluation(
 
 
 async def evaluate_proactive_triggers() -> None:
+    async with automations_session() as session:
+        async with _automations_lock():
+            await load_automations(session)
+
     for trigger in triggers.values():
         if trigger.posture != Posture.Proactive:
             continue
