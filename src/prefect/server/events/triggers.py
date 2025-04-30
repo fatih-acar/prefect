@@ -1104,6 +1104,9 @@ async def proactive_evaluation(
 async def evaluate_proactive_triggers() -> None:
     async with automations_session() as session:
         async with _automations_lock():
+            # FIXME: not the best way to reload automations
+            # load_automation() does "next_proactive_runs.pop(trigger.id, None)"
+            # this breaks things
             await load_automations(session)
 
     for trigger in triggers.values():
