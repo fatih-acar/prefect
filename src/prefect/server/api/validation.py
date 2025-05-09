@@ -180,8 +180,10 @@ async def _validate_work_pool_job_variables(
         )
         return
 
+    return
+
     try:
-        is_valid_schema(variables_schema, preprocess=False)
+        is_valid_schema(variables_schema, preprocess=False) # This
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
@@ -216,7 +218,7 @@ async def _validate_work_pool_job_variables(
         # to validate at runtime. Unfortunately, there is not a good solution to this
         # problem at this time.
         allow_none_with_default=True,
-    )
+    ) # THIS
 
 
 async def validate_job_variables_for_deployment_flow_run(
