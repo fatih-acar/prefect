@@ -51,9 +51,12 @@ async def create_logs(
         None
     """
     try:
-        await session.execute(
-            db.queries.insert(db.Log).values([log.model_dump() for log in logs])
-        )
+        # Use plain loop to insert each log in order to leverage SQLAlchemy's query cache
+        # SQLAlchemy does not support caching multi values insert yet
+        for log in logs:
+            await session.execute(
+                db.queries.insert(db.Log).values(log.model_dump())
+            )
     except RuntimeError as exc:
         if "can't create new thread at interpreter shutdown" in str(exc):
             # Background logs sometimes fail to write when the interpreter is shutting down.
