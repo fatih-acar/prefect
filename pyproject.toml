@@ -369,3 +369,4 @@ prefect-shell = { path = "src/integrations/prefect-shell" }
 prefect-slack = { path = "src/integrations/prefect-slack" }
 prefect-sqlalchemy = { path = "src/integrations/prefect-sqlalchemy" }
 prefect-snowflake = { path = "src/integrations/prefect-snowflake" }
+sqlalchemy = { git = "https://github.com/sqlalchemy/sqlalchemy.git" }
