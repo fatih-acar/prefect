@@ -261,17 +261,28 @@ async def _write_postgres_events(
         events: the events to insert
     """
     for batch in _in_safe_batches(events):
-        inserted_event_ids = set()
+        event_rows = [event.as_database_row() for event in batch]
+        result = await session.scalars(
+            db.queries.insert(db.Event)
+            .on_conflict_do_nothing()
+            .returning(db.Event.id)
+            .values(event_rows)
+        )
+        inserted_event_ids = set(result.all())
+
+        resource_rows: list[dict[str, Any]] = []
         for event in batch:
-            result = await session.execute(
-                db.queries.insert(db.Event)
-                .on_conflict_do_nothing()
-                .returning(db.Event.id)
-                .values(event.as_database_row())
-            )
-            if result.first():
-                for row in event.as_database_resource_rows():
-                    await session.execute(db.queries.insert(db.EventResource).values(row))
+            if event.id not in inserted_event_ids:
+                # if the event wasn't inserted, this means the event was a duplicate, so
+                # we will skip adding its related resources, as they would have been
+                # inserted already
+                continue
+            resource_rows.extend(event.as_database_resource_rows())
+
+        if not resource_rows:
+            continue
+
+        await session.execute(db.queries.insert(db.EventResource).values(resource_rows))
 
 
 def get_max_query_parameters() -> int:
