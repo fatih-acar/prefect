@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 logger: "logging.Logger" = get_logger(__name__)
 
 
-class EventLogger(RunInAllServers, Service):
+class EventLogger(Service):
     """A debugging service that logs events to the console as they arrive."""
 
     consumer_task: asyncio.Task[None] | None = None

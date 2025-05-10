@@ -77,7 +77,7 @@ async def batch_delete(
     return total_deleted
 
 
-class EventPersister(RunInAllServers, Service):
+class EventPersister(Service):
     """A service that persists events to the database as they arrive."""
 
     consumer_task: asyncio.Task[None] | None = None

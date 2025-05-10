@@ -217,7 +217,7 @@ async def consumer() -> AsyncGenerator[MessageHandler, None]:
     yield message_handler
 
 
-class TaskRunRecorder(RunInAllServers, Service):
+class TaskRunRecorder(Service):
     """Constructs task runs and states from client-emitted events"""
 
     consumer_task: asyncio.Task[None] | None = None
