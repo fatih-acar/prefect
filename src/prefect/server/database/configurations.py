@@ -1,4 +1,6 @@
+import os
 import sqlite3
+import ssl
 import traceback
 from abc import ABC, abstractmethod
 from asyncio import AbstractEventLoop, get_running_loop
@@ -30,6 +32,19 @@ from prefect.settings import (
     get_current_settings,
 )
 from prefect.utilities.asyncutils import add_event_loop_shutdown_callback
+
+if os.getenv("PREFECT_LOGFIRE_ENABLED"):
+    import logfire  # pyright: ignore
+
+    token: str | None = os.getenv("PREFECT_LOGFIRE_WRITE_TOKEN")
+    if token is None:
+        raise ValueError(
+            "PREFECT_LOGFIRE_WRITE_TOKEN must be set when PREFECT_LOGFIRE_ENABLED is true"
+        )
+
+    logfire.configure(token=token)  # pyright: ignore
+else:
+    logfire = None
 
 SQLITE_BEGIN_MODE: ContextVar[Optional[str]] = ContextVar(  # novm
     "SQLITE_BEGIN_MODE", default=None
@@ -242,6 +257,29 @@ class AsyncPostgresConfiguration(BaseDatabaseConfiguration):
                     application_name=self.connection_app_name
                 )
 
+            if get_current_settings().server.database.sqlalchemy.connect_args.tls.enabled:
+                tls_config = (
+                    get_current_settings().server.database.sqlalchemy.connect_args.tls
+                )
+
+                pg_ctx = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH)
+
+                if tls_config.ca_file:
+                    pg_ctx = ssl.create_default_context(
+                        purpose=ssl.Purpose.SERVER_AUTH, cafile=tls_config.ca_file
+                    )
+
+                pg_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+
+                if tls_config.cert_file and tls_config.key_file:
+                    pg_ctx.load_cert_chain(
+                        certfile=tls_config.cert_file, keyfile=tls_config.key_file
+                    )
+
+                pg_ctx.check_hostname = tls_config.check_hostname
+                pg_ctx.verify_mode = ssl.CERT_REQUIRED
+                connect_args["ssl"] = pg_ctx
+
             if connect_args:
                 kwargs["connect_args"] = connect_args
 
@@ -264,6 +302,9 @@ class AsyncPostgresConfiguration(BaseDatabaseConfiguration):
                 pool_use_lifo=True,
                 **kwargs,
             )
+
+            if logfire:
+                logfire.instrument_sqlalchemy(engine)  # pyright: ignore
 
             if TRACKER.active:
                 TRACKER.track_pool(engine.pool)
@@ -388,6 +429,9 @@ class AioSqliteConfiguration(BaseDatabaseConfiguration):
             engine = create_async_engine(self.connection_url, echo=self.echo, **kwargs)
             sa.event.listen(engine.sync_engine, "connect", self.setup_sqlite)
             sa.event.listen(engine.sync_engine, "begin", self.begin_sqlite_stmt)
+
+            if logfire:
+                logfire.instrument_sqlalchemy(engine)  # pyright: ignore
 
             if TRACKER.active:
                 TRACKER.track_pool(engine.pool)

@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import inspect
 import json
+import logging
 import random
 import sys
 import threading
@@ -61,6 +62,7 @@ from prefect.settings import (
     temporary_settings,
 )
 from prefect.states import State
+from prefect.task_worker import read_parameters
 from prefect.tasks import Task, task, task_input_hash
 from prefect.testing.utilities import exceptions_equal
 from prefect.transactions import (
@@ -76,23 +78,23 @@ from prefect.utilities.collections import quote
 from prefect.utilities.engine import get_state_for_result
 
 
-def comparable_inputs(d):
+def comparable_inputs(d: dict[str, Any]) -> dict[str, Any]:
     return {k: set(v) for k, v in d.items()}
 
 
 @pytest.fixture
-def timeout_test_flow():
+def timeout_test_flow() -> Any:
     @task(timeout_seconds=0.1)
-    def times_out(x):
+    def times_out(x: int) -> int:
         time.sleep(2)
         return x
 
     @task
-    def depends(x):
+    def depends(x: int) -> int:
         return x
 
     @task
-    def independent():
+    def independent() -> int:
         return 42
 
     @flow
@@ -105,11 +107,13 @@ def timeout_test_flow():
     return test_flow
 
 
-async def get_background_task_run_parameters(task, parameters_id):
+async def get_background_task_run_parameters(
+    task: Task[Any, Any], parameters_id: UUID
+) -> Any:
     store = await ResultStore(
         result_storage=await get_or_create_default_task_scheduling_storage()
     ).update_for_task(task)
-    return await store.read_parameters(parameters_id)
+    return await read_parameters(store, parameters_id)
 
 
 class TestTaskName:
@@ -167,7 +171,7 @@ class TestTaskRunName:
 
     def test_invalid_run_name(self):
         class InvalidTaskRunNameArg:
-            def format(*args, **kwargs):
+            def format(*args: Any, **kwargs: Any) -> Any:
                 pass
 
         with pytest.raises(
@@ -184,7 +188,7 @@ class TestTaskRunName:
 
     def test_invalid_runtime_run_name(self):
         class InvalidTaskRunNameArg:
-            def format(*args, **kwargs):
+            def format(*args: Any, **kwargs: Any) -> Any:
                 pass
 
         @task
@@ -1319,6 +1323,45 @@ class TestTaskRetries:
 
             test_flow()
             assert mock.call_count == 2
+
+    @pytest.mark.parametrize(
+        ("retries_configured", "expected_log_fragment"),
+        [
+            (0, "No retries configured for this task"),
+            (1, "Retries are exhausted"),
+        ],
+    )
+    async def test_task_retry_logging(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        retries_configured: int,
+        expected_log_fragment: str,
+    ):
+        caplog.set_level(logging.ERROR, logger="prefect.task_engine")
+        exc = ValueError("Test Exception")
+
+        @task(retries=retries_configured)
+        def failing_task():
+            raise exc
+
+        @flow
+        def test_flow():
+            try:
+                failing_task()
+            except ValueError:
+                pass  # Expected
+
+        test_flow()
+
+        found_message = False
+        for record in caplog.records:
+            if expected_log_fragment in record.message and record.levelname == "ERROR":
+                assert str(exc) in record.message
+                found_message = True
+                break
+        assert found_message, (
+            f"Expected log fragment '{expected_log_fragment}' not found in ERROR logs."
+        )
 
 
 class TestResultPersistence:

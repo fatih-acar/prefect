@@ -384,22 +384,6 @@ class SyncTaskRunEngine(BaseTaskRunEngine[P, R]):
                 self.logger.info(f"Hook {hook_name!r} finished running successfully")
 
     def begin_run(self) -> None:
-        try:
-            self._resolve_parameters()
-            self._set_custom_task_run_name()
-            self._wait_for_dependencies()
-        except UpstreamTaskError as upstream_exc:
-            state = self.set_state(
-                Pending(
-                    name="NotReady",
-                    message=str(upstream_exc),
-                ),
-                # if orchestrating a run already in a pending state, force orchestration to
-                # update the state name
-                force=self.state.is_pending(),
-            )
-            return
-
         new_state = Running()
 
         assert self.task_run is not None, "Task run is not set"
@@ -562,9 +546,13 @@ class SyncTaskRunEngine(BaseTaskRunEngine[P, R]):
             self.retries: int = self.retries + 1
             return True
         elif self.retries >= self.task.retries:
+            retry_message_suffix = (
+                "Retries are exhausted"
+                if self.task.retries > 0
+                else "No retries configured for this task."
+            )
             self.logger.error(
-                "Task run failed with exception: %r - Retries are exhausted",
-                exc,
+                f"Task run failed with exception: {exc!r} - {retry_message_suffix}",
                 exc_info=True,
             )
             return False
@@ -765,6 +753,24 @@ class SyncTaskRunEngine(BaseTaskRunEngine[P, R]):
                 if self._telemetry.span
                 else nullcontext()
             ):
+                try:
+                    self._resolve_parameters()
+                    self._set_custom_task_run_name()
+                    self._wait_for_dependencies()
+                except UpstreamTaskError as upstream_exc:
+                    self.set_state(
+                        Pending(
+                            name="NotReady",
+                            message=str(upstream_exc),
+                        ),
+                        # if orchestrating a run already in a pending state, force orchestration to
+                        # update the state name
+                        force=self.state.is_pending(),
+                    )
+                    yield
+                    self.call_hooks()
+                    return
+
                 # Acquire a concurrency slot for each tag, but only if a limit
                 # matching the tag already exists.
                 with concurrency(list(self.task_run.tags), self.task_run.id):
@@ -921,7 +927,6 @@ class AsyncTaskRunEngine(BaseTaskRunEngine[P, R]):
         try:
             self._resolve_parameters()
             self._set_custom_task_run_name()
-            self._wait_for_dependencies()
         except UpstreamTaskError as upstream_exc:
             state = await self.set_state(
                 Pending(
@@ -1095,9 +1100,13 @@ class AsyncTaskRunEngine(BaseTaskRunEngine[P, R]):
             self.retries: int = self.retries + 1
             return True
         elif self.retries >= self.task.retries:
+            retry_message_suffix = (
+                "Retries are exhausted"
+                if self.task.retries > 0
+                else "No retries configured for this task."
+            )
             self.logger.error(
-                "Task run failed with exception: %r - Retries are exhausted",
-                exc,
+                f"Task run failed with exception: {exc!r} - {retry_message_suffix}",
                 exc_info=True,
             )
             return False
@@ -1298,6 +1307,23 @@ class AsyncTaskRunEngine(BaseTaskRunEngine[P, R]):
                 if self._telemetry.span
                 else nullcontext()
             ):
+                try:
+                    self._resolve_parameters()
+                    self._set_custom_task_run_name()
+                    self._wait_for_dependencies()
+                except UpstreamTaskError as upstream_exc:
+                    await self.set_state(
+                        Pending(
+                            name="NotReady",
+                            message=str(upstream_exc),
+                        ),
+                        # if orchestrating a run already in a pending state, force orchestration to
+                        # update the state name
+                        force=self.state.is_pending(),
+                    )
+                    yield
+                    await self.call_hooks()
+                    return
                 # Acquire a concurrency slot for each tag, but only if a limit
                 # matching the tag already exists.
                 async with aconcurrency(list(self.task_run.tags), self.task_run.id):
