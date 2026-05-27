@@ -1,4 +1,5 @@
 import abc
+import asyncio
 from textwrap import dedent
 from types import TracebackType
 from typing import (
@@ -244,7 +245,13 @@ class PrefectServerEventsClient(EventsClient):
 class PrefectServerEventsAPIClient:
     _http_client: PrefectHttpxAsyncClient
 
+    # Process-level cache keyed by current settings identity. See
+    # `prefect.server.api.clients.BaseClient.shared` for the rationale.
+    _shared_instances: ClassVar[Dict[int, "PrefectServerEventsAPIClient"]] = {}
+    _shared_lock: ClassVar[Optional[asyncio.Lock]] = None
+
     def __init__(self, additional_headers: dict[str, str] = {}):
+        from prefect.server.api.clients import _apply_scoped_headers
         from prefect.server.api.server import create_app
 
         # create_app caches application instances, and invoking it with no arguments
@@ -257,7 +264,36 @@ class PrefectServerEventsAPIClient:
             base_url="http://prefect-in-memory/api",
             enable_csrf_support=False,
             raise_on_all_errors=False,
+            event_hooks={"request": [_apply_scoped_headers]},
         )
+
+    @classmethod
+    async def shared(cls) -> "PrefectServerEventsAPIClient":
+        from prefect.settings import get_current_settings
+
+        key = id(get_current_settings())
+        instance = cls._shared_instances.get(key)
+        if instance is not None:
+            return instance
+        if cls._shared_lock is None:
+            cls._shared_lock = asyncio.Lock()
+        async with cls._shared_lock:
+            instance = cls._shared_instances.get(key)
+            if instance is None:
+                instance = cls()
+                await instance._http_client.__aenter__()
+                cls._shared_instances[key] = instance
+        return instance
+
+    @classmethod
+    async def _reset_shared(cls) -> None:
+        instances = list(cls._shared_instances.values())
+        cls._shared_instances.clear()
+        for instance in instances:
+            try:
+                await instance._http_client.__aexit__(None, None, None)
+            except Exception:
+                pass
 
     async def __aenter__(self) -> Self:
         await self._http_client.__aenter__()
