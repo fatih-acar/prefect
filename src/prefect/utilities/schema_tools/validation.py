@@ -1,9 +1,12 @@
+import hashlib
+import json
 from collections import defaultdict, deque
 from collections.abc import Callable, Iterable, Iterator
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, cast
 
 import jsonschema
+from cachetools import LRUCache
 from jsonschema.exceptions import ValidationError as JSONSchemaValidationError
 from jsonschema.validators import Draft202012Validator, create
 from referencing.jsonschema import ObjectSchema, Schema
@@ -61,6 +64,58 @@ def _build_validator() -> type["_Validator"]:
 
 _VALIDATOR = _build_validator()
 
+# Compiling a jsonschema validator (and the `preprocess_schema` deepcopy that
+# feeds it) shows up on flamegraphs of high-traffic deployment endpoints, where
+# the same `parameter_openapi_schema` is validated against repeatedly. Cache
+# the compiled validator keyed on the schema's canonical content hash so warm
+# calls skip both the deepcopy and the validator construction.
+_VALIDATOR_CACHE_MAXSIZE = 512
+_VALIDATOR_CACHE: "LRUCache[tuple[bytes, bool, bool, bool], _Validator]" = LRUCache(
+    maxsize=_VALIDATOR_CACHE_MAXSIZE
+)
+
+
+def _schema_cache_key(
+    schema: ObjectSchema,
+    preprocess: bool,
+    ignore_required: bool,
+    allow_none_with_default: bool,
+) -> tuple[bytes, bool, bool, bool] | None:
+    try:
+        canonical = json.dumps(
+            schema, sort_keys=True, separators=(",", ":"), default=str
+        )
+    except (TypeError, ValueError):
+        return None
+    digest = hashlib.blake2b(canonical.encode("utf-8"), digest_size=16).digest()
+    return (digest, preprocess, ignore_required, allow_none_with_default)
+
+
+def _get_cached_validator(
+    schema: ObjectSchema,
+    preprocess: bool,
+    ignore_required: bool,
+    allow_none_with_default: bool,
+) -> "_Validator":
+    key = _schema_cache_key(
+        schema, preprocess, ignore_required, allow_none_with_default
+    )
+    if key is not None:
+        cached = _VALIDATOR_CACHE.get(key)
+        if cached is not None:
+            return cached
+
+    processed = schema
+    if preprocess:
+        processed = preprocess_schema(processed, allow_none_with_default)
+    if ignore_required:
+        processed = remove_nested_keys(["required"], processed)
+
+    validator = _VALIDATOR(processed, format_checker=_VALIDATOR.FORMAT_CHECKER)
+    if key is not None:
+        _VALIDATOR_CACHE[key] = validator
+    return validator
+
 
 def is_valid_schema(schema: ObjectSchema, preprocess: bool = True) -> None:
     if preprocess:
@@ -79,15 +134,16 @@ def validate(
     ignore_required: bool = False,
     allow_none_with_default: bool = False,
 ) -> list[JSONSchemaValidationError]:
-    if preprocess:
-        schema = preprocess_schema(schema, allow_none_with_default)
-
-    if ignore_required:
-        schema = remove_nested_keys(["required"], schema)
+    try:
+        validator = _get_cached_validator(
+            schema, preprocess, ignore_required, allow_none_with_default
+        )
+    except RecursionError:
+        raise CircularSchemaRefError
 
     if raise_on_error:
         try:
-            jsonschema.validate(obj, schema, _VALIDATOR)
+            validator.validate(obj)
         except RecursionError:
             raise CircularSchemaRefError
         except JSONSchemaValidationError as exc:
@@ -102,7 +158,6 @@ def validate(
         return []
     else:
         try:
-            validator = _VALIDATOR(schema, format_checker=_VALIDATOR.FORMAT_CHECKER)
             errors = list(validator.iter_errors(obj))  # type: ignore
         except RecursionError:
             raise CircularSchemaRefError

@@ -12,6 +12,8 @@ from prefect.utilities.schema_tools.hydration import (
 )
 from prefect.utilities.schema_tools.validation import (
     CircularSchemaRefError,
+    ValidationError,
+    _VALIDATOR_CACHE,
     build_error_obj,
     is_valid,
     preprocess_schema,
@@ -2199,3 +2201,99 @@ class TestPreprocessSchemaPydanticV2Tuples:
         # no change
         preprocessed_schema = preprocess_schema(schema)
         assert preprocessed_schema == schema
+
+
+class TestValidatorCaching:
+    @pytest.fixture(autouse=True)
+    def _clear_validator_cache(self):
+        _VALIDATOR_CACHE.clear()
+        yield
+        _VALIDATOR_CACHE.clear()
+
+    async def test_repeated_validate_reuses_cached_validator(self):
+        schema = {
+            "title": "Parameters",
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        }
+
+        validate({"name": "alice"}, schema, raise_on_error=True)
+        size_after_first = len(_VALIDATOR_CACHE)
+        validate({"name": "bob"}, schema, raise_on_error=True)
+
+        assert size_after_first == 1
+        assert len(_VALIDATOR_CACHE) == 1
+
+    async def test_validate_after_schema_mutation_uses_new_validator(self):
+        schema_a = {
+            "title": "Parameters",
+            "type": "object",
+            "properties": {"num": {"type": "integer"}},
+            "required": ["num"],
+        }
+        schema_b = {
+            "title": "Parameters",
+            "type": "object",
+            "properties": {"num": {"type": "string"}},
+            "required": ["num"],
+        }
+
+        # Valid against A, invalid against B
+        validate({"num": 42}, schema_a, raise_on_error=True)
+        with pytest.raises(ValidationError):
+            validate({"num": 42}, schema_b, raise_on_error=True)
+
+        # Valid against B, invalid against A
+        validate({"num": "hello"}, schema_b, raise_on_error=True)
+        with pytest.raises(ValidationError):
+            validate({"num": "hello"}, schema_a, raise_on_error=True)
+
+        assert len(_VALIDATOR_CACHE) == 2
+
+    async def test_validate_cache_partitions_on_flags(self):
+        schema = {
+            "title": "Parameters",
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        }
+
+        # ignore_required=False -> missing field is an error
+        with pytest.raises(ValidationError):
+            validate({}, schema, raise_on_error=True, ignore_required=False)
+
+        # ignore_required=True -> missing field is fine
+        validate({}, schema, raise_on_error=True, ignore_required=True)
+
+        # Both variants should be cached independently
+        assert len(_VALIDATOR_CACHE) == 2
+
+    async def test_circular_schema_raises_consistently(self):
+        circular_schema = {
+            "title": "Parameters",
+            "type": "object",
+            "properties": {
+                "param": {
+                    "title": "param",
+                    "allOf": [{"$ref": "#/definitions/City"}],
+                }
+            },
+            "required": ["param"],
+            "definitions": {
+                "City": {
+                    "title": "City",
+                    "properties": {"name": {"type": "string"}},
+                    # references itself
+                    "allOf": [{"$ref": "#/definitions/City"}],
+                }
+            },
+        }
+
+        with pytest.raises(CircularSchemaRefError):
+            validate({"param": {"name": "Paris"}}, circular_schema)
+
+        # second call must surface the same error even though the
+        # validator may have been cached from the first call
+        with pytest.raises(CircularSchemaRefError):
+            validate({"param": {"name": "Paris"}}, circular_schema)
