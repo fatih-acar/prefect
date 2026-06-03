@@ -1,6 +1,6 @@
 import asyncio
 import functools
-from typing import Any, Callable, Union
+from typing import Any, Callable, Optional, Union
 
 from pydantic import Field
 from redis.asyncio import Redis
@@ -10,6 +10,7 @@ from prefect.settings.base import (
     PrefectBaseSettings,
     build_settings_config,  # type: ignore[reportPrivateUsage]
 )
+from prefect_redis.connection import build_redis_client, parse_redis_url
 
 
 class RedisMessagingSettings(PrefectBaseSettings):
@@ -33,6 +34,16 @@ class RedisMessagingSettings(PrefectBaseSettings):
     ssl: bool = Field(
         default=False,
         description="Whether to use SSL for the Redis connection",
+    )
+    connection_url: Optional[str] = Field(
+        default=None,
+        description=(
+            "Full Redis connection URL, authoritative over the scalar connection settings "
+            "when set. Supports the redis://, rediss://, redis+sentinel:// and "
+            "rediss+sentinel:// schemes; the Sentinel schemes accept a comma-separated list "
+            "of members and a master group name, e.g. "
+            "redis+sentinel://sentinel-a:26379,sentinel-b:26379/mymaster."
+        ),
     )
 
 
@@ -116,6 +127,18 @@ def get_async_redis_client(
     """
     settings = RedisMessagingSettings()
 
+    # A connection URL is authoritative over the scalar settings and selects single-node
+    # or Sentinel mode from its scheme. Explicit positional overrides (e.g. a test passing
+    # host=...) still take precedence so callers can target a specific server.
+    if settings.connection_url and host is None:
+        return build_redis_client(
+            parse_redis_url(settings.connection_url),
+            asynchronous=True,
+            decode_responses=decode_responses,
+            health_check_interval=health_check_interval
+            or settings.health_check_interval,
+        )
+
     return Redis(
         host=host or settings.host,
         port=port or settings.port,
@@ -134,15 +157,21 @@ def async_redis_from_settings(
 ) -> Redis:
     options = {
         "decode_responses": True,
+        "health_check_interval": settings.health_check_interval,
         **options,
     }
+    if settings.connection_url:
+        return build_redis_client(
+            parse_redis_url(settings.connection_url),
+            asynchronous=True,
+            **options,
+        )
     return Redis(
         host=settings.host,
         port=settings.port,
         db=settings.db,
         password=settings.password,
         username=settings.username,
-        health_check_interval=settings.health_check_interval,
         ssl=settings.ssl,
         **options,
     )
