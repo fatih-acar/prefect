@@ -82,52 +82,57 @@ def provide_database_interface() -> PrefectDBInterface:
         AsyncPostgresQueryComponents,
     )
 
-    connection_url = PREFECT_API_DATABASE_CONNECTION_URL.value()
-
     database_config = MODELS_DEPENDENCIES.get("database_config")
     query_components = MODELS_DEPENDENCIES.get("query_components")
     orm = MODELS_DEPENDENCIES.get("orm")
     interface_class = MODELS_DEPENDENCIES.get("interface_class")
-    dialect = get_dialect(connection_url)
 
-    if database_config is None:
-        if dialect.name == "postgresql":
-            database_config = AsyncPostgresConfiguration(connection_url=connection_url)
-        elif dialect.name == "sqlite":
-            database_config = AioSqliteConfiguration(connection_url=connection_url)
-        else:
-            raise ValueError(
-                "Unable to infer database configuration from provided dialect. Got"
-                f" dialect name {dialect.name!r}"
-            )
+    # This runs for every API request and every injected model function, and
+    # reading and parsing the connection URL costs more than the rest of it.
+    if database_config is None or query_components is None or orm is None:
+        connection_url = PREFECT_API_DATABASE_CONNECTION_URL.value()
+        dialect = get_dialect(connection_url)
 
-        MODELS_DEPENDENCIES["database_config"] = database_config
+        if database_config is None:
+            if dialect.name == "postgresql":
+                database_config = AsyncPostgresConfiguration(
+                    connection_url=connection_url
+                )
+            elif dialect.name == "sqlite":
+                database_config = AioSqliteConfiguration(connection_url=connection_url)
+            else:
+                raise ValueError(
+                    "Unable to infer database configuration from provided dialect. Got"
+                    f" dialect name {dialect.name!r}"
+                )
 
-    if query_components is None:
-        if dialect.name == "postgresql":
-            query_components = AsyncPostgresQueryComponents()
-        elif dialect.name == "sqlite":
-            query_components = AioSqliteQueryComponents()
-        else:
-            raise ValueError(
-                "Unable to infer query components from provided dialect. Got dialect"
-                f" name {dialect.name!r}"
-            )
+            MODELS_DEPENDENCIES["database_config"] = database_config
 
-        MODELS_DEPENDENCIES["query_components"] = query_components
+        if query_components is None:
+            if dialect.name == "postgresql":
+                query_components = AsyncPostgresQueryComponents()
+            elif dialect.name == "sqlite":
+                query_components = AioSqliteQueryComponents()
+            else:
+                raise ValueError(
+                    "Unable to infer query components from provided dialect. Got dialect"
+                    f" name {dialect.name!r}"
+                )
 
-    if orm is None:
-        if dialect.name == "postgresql":
-            orm = AsyncPostgresORMConfiguration()
-        elif dialect.name == "sqlite":
-            orm = AioSqliteORMConfiguration()
-        else:
-            raise ValueError(
-                "Unable to infer orm configuration from provided dialect. Got dialect"
-                f" name {dialect.name!r}"
-            )
+            MODELS_DEPENDENCIES["query_components"] = query_components
 
-        MODELS_DEPENDENCIES["orm"] = orm
+        if orm is None:
+            if dialect.name == "postgresql":
+                orm = AsyncPostgresORMConfiguration()
+            elif dialect.name == "sqlite":
+                orm = AioSqliteORMConfiguration()
+            else:
+                raise ValueError(
+                    "Unable to infer orm configuration from provided dialect. Got dialect"
+                    f" name {dialect.name!r}"
+                )
+
+            MODELS_DEPENDENCIES["orm"] = orm
 
     if interface_class is None:
         interface_class = PrefectDBInterface

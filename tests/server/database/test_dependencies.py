@@ -144,6 +144,30 @@ async def test_inject_interface_class():
         assert isinstance(db, TestInterface)
 
 
+def test_reuses_set_components_without_parsing_the_connection_url(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    expected = dependencies.provide_database_interface()
+    parsed_urls: list[str] = []
+
+    def get_dialect(url: str):
+        parsed_urls.append(url)
+        raise AssertionError("the connection URL should not be parsed")
+
+    monkeypatch.setattr(dependencies, "get_dialect", get_dialect)
+
+    assert dependencies.provide_database_interface() is expected
+    assert parsed_urls == []
+
+
+async def test_infers_a_missing_component_from_the_connection_url():
+    with dependencies.temporary_query_components(None):
+        db = dependencies.provide_database_interface()
+        assert isinstance(
+            db.queries, (AsyncPostgresQueryComponents, AioSqliteQueryComponents)
+        )
+
+
 class TestDBInject:
     @pytest.fixture(autouse=True)
     def _setup(self):
