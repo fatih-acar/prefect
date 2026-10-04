@@ -38,6 +38,16 @@ _flow_run_resource_data_cache: MutableMapping[UUID, ResourceData] = TTLCache(
     ttl=PREFECT_API_EVENTS_RELATED_RESOURCE_CACHE_TTL.value().total_seconds(),
 )
 
+# Flow runs of one deployment share their flow, deployment, work queue and work pool,
+# so that part of the resource data is cached by those ids rather than per flow run.
+_SHARED_RESOURCE_KINDS = ("flow", "deployment", "work-queue", "work-pool")
+_shared_resource_data_cache: MutableMapping[
+    tuple[UUID, Optional[UUID], Optional[UUID]], ResourceData
+] = TTLCache(
+    maxsize=1000,
+    ttl=PREFECT_API_EVENTS_RELATED_RESOURCE_CACHE_TTL.value().total_seconds(),
+)
+
 
 async def flow_run_state_change_event(
     session: AsyncSession,
@@ -89,6 +99,31 @@ async def _flow_run_related_resources_from_orm(
 ) -> RelatedResourceList:
     resource_data = _flow_run_resource_data_cache.get(flow_run.id)
     if not resource_data:
+        task_run: Optional[ORMTaskRun] = None
+        if flow_run.parent_task_run_id:
+            task_run = await models.task_runs.read_task_run(
+                session,
+                task_run_id=flow_run.parent_task_run_id,
+            )
+
+        resource_data = _as_resource_data(flow_run, None, None, None, None, task_run)
+        resource_data.update(
+            await _shared_resource_data_from_orm(session=session, flow_run=flow_run)
+        )
+        _flow_run_resource_data_cache[flow_run.id] = resource_data
+
+    return _resource_data_as_related_resources(
+        resource_data,
+        excluded_kinds=["flow-run"],
+    ) + _provenance_as_related_resources(flow_run.created_by)
+
+
+async def _shared_resource_data_from_orm(
+    session: AsyncSession, flow_run: ORMFlowRun
+) -> ResourceData:
+    key = (flow_run.flow_id, flow_run.deployment_id, flow_run.work_queue_id)
+    shared_resource_data = _shared_resource_data_cache.get(key)
+    if shared_resource_data is None:
         flow = await models.flows.read_flow(session=session, flow_id=flow_run.flow_id)
         deployment: Optional[ORMDeployment] = None
         if flow_run.deployment_id:
@@ -104,22 +139,15 @@ async def _flow_run_related_resources_from_orm(
 
         work_pool = work_queue.work_pool if work_queue is not None else None
 
-        task_run: Optional[ORMTaskRun] = None
-        if flow_run.parent_task_run_id:
-            task_run = await models.task_runs.read_task_run(
-                session,
-                task_run_id=flow_run.parent_task_run_id,
-            )
-
         resource_data = _as_resource_data(
-            flow_run, flow, deployment, work_queue, work_pool, task_run
+            flow_run, flow, deployment, work_queue, work_pool
         )
-        _flow_run_resource_data_cache[flow_run.id] = resource_data
+        shared_resource_data = {
+            kind: resource_data[kind] for kind in _SHARED_RESOURCE_KINDS
+        }
+        _shared_resource_data_cache[key] = shared_resource_data
 
-    return _resource_data_as_related_resources(
-        resource_data,
-        excluded_kinds=["flow-run"],
-    ) + _provenance_as_related_resources(flow_run.created_by)
+    return shared_resource_data
 
 
 def _as_resource_data(

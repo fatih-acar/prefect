@@ -22,7 +22,10 @@ from prefect.server.database.orm_models import (
 from prefect.server.events.clients import AssertingEventsClient
 from prefect.server.events.schemas.events import RelatedResource, Resource
 from prefect.server.models import events, flow_run_states, flow_runs, workers
-from prefect.server.models.events import _flow_run_resource_data_cache
+from prefect.server.models.events import (
+    _flow_run_resource_data_cache,
+    _shared_resource_data_cache,
+)
 from prefect.server.models.work_queues import create_work_queue
 from prefect.server.orchestration.instrumentation_policies import (
     InstrumentFlowRunStateTransitions,
@@ -51,6 +54,7 @@ pytestmark = pytest.mark.clear_db
 @pytest.fixture(autouse=True)
 def cleared_resource_data_cache():
     _flow_run_resource_data_cache.clear()
+    _shared_resource_data_cache.clear()
 
 
 @pytest.fixture
@@ -900,6 +904,55 @@ async def test_caches_resource_data(
         },
         "task-run": {},
     }
+
+
+async def test_flow_runs_of_one_deployment_share_cached_resource_data(
+    session: AsyncSession,
+    work_queue: ORMWorkQueue,
+    flow: ORMFlow,
+    flow_run: ORMFlowRun,
+    deployment: ORMDeployment,
+    orchestration_parameters: Dict[str, Any],
+):
+    flow_run.work_queue_id = work_queue.id
+    flow_run.deployment_id = deployment.id
+    session.add(flow_run)
+    await session.commit()
+
+    async def start(run: ORMFlowRun) -> None:
+        transition = (StateType.PENDING, StateType.RUNNING)
+        context = FlowOrchestrationContext(
+            initial_state=State(type=transition[0]),
+            proposed_state=State(type=transition[1]),
+            run=run,
+            session=session,
+            parameters=orchestration_parameters,
+        )
+        async with InstrumentFlowRunStateTransitions(context, *transition):
+            await context.validate_proposed_state()
+        await session.commit()
+
+    await start(flow_run)
+    original_name = deployment.name
+    deployment.name = "renamed-deployment"
+    session.add(deployment)
+    await session.commit()
+
+    second_flow_run = await flow_runs.create_flow_run(
+        session=session,
+        flow_run=FlowRun(
+            flow_id=flow.id,
+            deployment_id=deployment.id,
+            work_queue_id=work_queue.id,
+            state=Pending(),
+        ),
+    )
+    await session.commit()
+    await start(second_flow_run)
+
+    deployment_data = _flow_run_resource_data_cache[second_flow_run.id]["deployment"]
+    assert deployment_data["id"] == str(deployment.id)
+    assert deployment_data["name"] == original_name
 
 
 async def test_caches_resource_data_for_subflow_runs(
