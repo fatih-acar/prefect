@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Optional, Sequence, Union
 from uuid import UUID
@@ -144,28 +144,31 @@ class EventDataFilter(PrefectBaseModel, extra="forbid"):
 
     _top_level_filter: Optional[Select[tuple[UUID]]] = PrivateAttr(None)
 
-    def get_filters(self) -> list["EventDataFilter"]:
-        filters: list[EventDataFilter] = []
-        for filter in [
-            getattr(self, name) for name in self.__class__.model_fields.keys()
-        ]:
+    def _subfilters(self) -> Iterator["EventDataFilter"]:
+        for name in self.__class__.model_fields.keys():
+            filter = getattr(self, name)
             # Any embedded list of filters are flattened and thus ANDed together
             subfilters: list[EventDataFilter] = (
                 filter if isinstance(filter, list) else [filter]
             )
 
             for subfilter in subfilters:
-                if not isinstance(subfilter, EventDataFilter):
-                    continue
+                if isinstance(subfilter, EventDataFilter):
+                    yield subfilter
 
-                subfilter._top_level_filter = self._top_level_filter
-                filters.append(subfilter)
+    def get_filters(self) -> list["EventDataFilter"]:
+        filters: list[EventDataFilter] = []
+        for subfilter in self._subfilters():
+            subfilter._top_level_filter = self._top_level_filter
+            filters.append(subfilter)
 
         return filters
 
     def includes(self, event: Event) -> bool:
         """Does the given event match the criteria of this filter?"""
-        return all(filter.includes(event) for filter in self.get_filters())
+        # The event stream matches every event against every subscriber's filter,
+        # so matching skips the private-attribute writes only query building needs.
+        return all(filter.includes(event) for filter in self._subfilters())
 
     def excludes(self, event: Event) -> bool:
         """Would the given filter exclude this event?"""
