@@ -572,6 +572,38 @@ class TestStartFlowRunEngine:
             # avoid error on teardown
             engine.begin_run()
 
+    async def test_start_sends_policy_and_custom_name_in_one_update(
+        self, prefect_client: PrefectClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        @flow(retries=3, retry_delay_seconds=10, flow_run_name="custom-{x}")
+        def flow_with_retries(x: str):
+            pass
+
+        flow_run = await prefect_client.create_flow_run(
+            flow_with_retries, parameters={"x": "a"}
+        )
+        updates: list[dict[str, Any]] = []
+        update_flow_run = SyncPrefectClient.update_flow_run
+
+        def record_update(
+            client: SyncPrefectClient, flow_run_id: UUID, **kwargs: Any
+        ) -> Any:
+            if flow_run_id == flow_run.id:
+                updates.append(kwargs)
+            return update_flow_run(client, flow_run_id, **kwargs)
+
+        monkeypatch.setattr(SyncPrefectClient, "update_flow_run", record_update)
+
+        run_flow_sync(flow_with_retries, flow_run=flow_run, parameters={"x": "a"})
+
+        assert len(updates) == 1
+        assert updates[0]["name"] == "custom-a"
+        assert updates[0]["empirical_policy"].retries == 3
+        assert updates[0]["empirical_policy"].retry_delay == 10
+        read_run = await prefect_client.read_flow_run(flow_run.id)
+        assert read_run.name == "custom-a"
+        assert read_run.empirical_policy.retries == 3
+
 
 class TestStartAsyncFlowRunEngine:
     async def test_start_updates_empirical_policy_on_provided_flow_run(
@@ -590,6 +622,40 @@ class TestStartAsyncFlowRunEngine:
 
             # avoid error on teardown
             await engine.begin_run()
+
+    async def test_start_sends_policy_and_custom_name_in_one_update(
+        self, prefect_client: PrefectClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        @flow(retries=3, retry_delay_seconds=10, flow_run_name="custom-{x}")
+        async def flow_with_retries(x: str):
+            pass
+
+        flow_run = await prefect_client.create_flow_run(
+            flow_with_retries, parameters={"x": "a"}
+        )
+        updates: list[dict[str, Any]] = []
+        update_flow_run = PrefectClient.update_flow_run
+
+        async def record_update(
+            client: PrefectClient, flow_run_id: UUID, **kwargs: Any
+        ) -> Any:
+            if flow_run_id == flow_run.id:
+                updates.append(kwargs)
+            return await update_flow_run(client, flow_run_id, **kwargs)
+
+        monkeypatch.setattr(PrefectClient, "update_flow_run", record_update)
+
+        await run_flow_async(
+            flow_with_retries, flow_run=flow_run, parameters={"x": "a"}
+        )
+
+        assert len(updates) == 1
+        assert updates[0]["name"] == "custom-a"
+        assert updates[0]["empirical_policy"].retries == 3
+        assert updates[0]["empirical_policy"].retry_delay == 10
+        read_run = await prefect_client.read_flow_run(flow_run.id)
+        assert read_run.name == "custom-a"
+        assert read_run.empirical_policy.retries == 3
 
 
 FlowExecutionShape = Literal["sync", "async", "generator", "async-generator"]

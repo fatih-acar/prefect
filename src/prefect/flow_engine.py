@@ -418,6 +418,9 @@ class BaseFlowRunEngine(Generic[P, R]):
     _is_started: bool = False
     short_circuit: bool = False
     _flow_run_name_set: bool = False
+    # Flow run fields not sent yet: the next flow run update or state proposal
+    # carries them, so a run's policy and custom name share one request.
+    _pending_flow_run_update: dict[str, Any] = field(default_factory=dict)
     _started_with_in_process_parent_flow_run_context: bool = False
     _telemetry: RunTelemetry = field(default_factory=RunTelemetry)
     _flow_run_suspension_request: FlowRunSuspensionRequest = field(
@@ -736,9 +739,7 @@ class FlowRunEngine(BaseFlowRunEngine[P, R]):
                 flow_run_name = resolve_custom_flow_run_name(
                     flow=self.flow, parameters=self.parameters or {}
                 )
-            self.client.set_flow_run_name(
-                flow_run_id=self.flow_run.id, name=flow_run_name
-            )
+            self._update_flow_run(name=flow_run_name)
             self.flow_run.name = flow_run_name
             self._flow_run_name_set = True
             self._telemetry.update_run_name(name=flow_run_name)
@@ -751,12 +752,20 @@ class FlowRunEngine(BaseFlowRunEngine[P, R]):
             state = self.set_state(new_state)
         return state
 
+    def _update_flow_run(self, **updates: Any) -> None:
+        updates = {**self._pending_flow_run_update, **updates}
+        self._pending_flow_run_update = {}
+        if updates:
+            self.client.update_flow_run(flow_run_id=self.flow_run.id, **updates)
+
     def set_state(self, state: State, force: bool = False) -> State:
         """ """
         # prevents any state-setting activity
         if self.short_circuit:
             return self.state
 
+        # Orchestration reads the run's policy, so it must reach the API first.
+        self._update_flow_run()
         state = propose_state_sync(
             self.client, state, flow_run_id=self.flow_run.id, force=force
         )  # type: ignore
@@ -1143,9 +1152,7 @@ class FlowRunEngine(BaseFlowRunEngine[P, R]):
                 flow_run_name = resolve_custom_flow_run_name(
                     flow=self.flow, parameters=self.parameters
                 )
-                self.client.set_flow_run_name(
-                    flow_run_id=self.flow_run.id, name=flow_run_name
-                )
+                self._update_flow_run(name=flow_run_name)
 
                 self.logger.extra["flow_run_name"] = flow_run_name
                 self.logger.debug(
@@ -1201,11 +1208,10 @@ class FlowRunEngine(BaseFlowRunEngine[P, R]):
                     if self.flow_run.empirical_policy.retries is None:
                         self.flow_run.empirical_policy.retries = self.flow.retries
 
-                    self.client.update_flow_run(
-                        flow_run_id=self.flow_run.id,
-                        flow_version=self.flow.version,
-                        empirical_policy=self.flow_run.empirical_policy,
-                    )
+                    self._pending_flow_run_update = {
+                        "flow_version": self.flow.version,
+                        "empirical_policy": self.flow_run.empirical_policy,
+                    }
 
                 self._telemetry.start_span(
                     run=self.flow_run,
@@ -1460,9 +1466,7 @@ class AsyncFlowRunEngine(BaseFlowRunEngine[P, R]):
                 flow_run_name = resolve_custom_flow_run_name(
                     flow=self.flow, parameters=self.parameters or {}
                 )
-            await self.client.set_flow_run_name(
-                flow_run_id=self.flow_run.id, name=flow_run_name
-            )
+            await self._update_flow_run(name=flow_run_name)
             self.flow_run.name = flow_run_name
             self._flow_run_name_set = True
             self._telemetry.update_run_name(name=flow_run_name)
@@ -1475,12 +1479,20 @@ class AsyncFlowRunEngine(BaseFlowRunEngine[P, R]):
             state = await self.set_state(new_state)
         return state
 
+    async def _update_flow_run(self, **updates: Any) -> None:
+        updates = {**self._pending_flow_run_update, **updates}
+        self._pending_flow_run_update = {}
+        if updates:
+            await self.client.update_flow_run(flow_run_id=self.flow_run.id, **updates)
+
     async def set_state(self, state: State, force: bool = False) -> State:
         """ """
         # prevents any state-setting activity
         if self.short_circuit:
             return self.state
 
+        # Orchestration reads the run's policy, so it must reach the API first.
+        await self._update_flow_run()
         state = await propose_state(
             self.client, state, flow_run_id=self.flow_run.id, force=force
         )  # type: ignore
@@ -1860,9 +1872,7 @@ class AsyncFlowRunEngine(BaseFlowRunEngine[P, R]):
                 flow_run_name = resolve_custom_flow_run_name(
                     flow=self.flow, parameters=self.parameters
                 )
-                await self.client.set_flow_run_name(
-                    flow_run_id=self.flow_run.id, name=flow_run_name
-                )
+                await self._update_flow_run(name=flow_run_name)
                 self.logger.extra["flow_run_name"] = flow_run_name
                 self.logger.debug(
                     f"Renamed flow run {self.flow_run.name!r} to {flow_run_name!r}"
@@ -1922,11 +1932,10 @@ class AsyncFlowRunEngine(BaseFlowRunEngine[P, R]):
                     if self.flow_run.empirical_policy.retries is None:
                         self.flow_run.empirical_policy.retries = self.flow.retries
 
-                    await self.client.update_flow_run(
-                        flow_run_id=self.flow_run.id,
-                        flow_version=self.flow.version,
-                        empirical_policy=self.flow_run.empirical_policy,
-                    )
+                    self._pending_flow_run_update = {
+                        "flow_version": self.flow.version,
+                        "empirical_policy": self.flow_run.empirical_policy,
+                    }
 
                 await self._telemetry.async_start_span(
                     run=self.flow_run,
