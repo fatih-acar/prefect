@@ -24,7 +24,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import load_only, selectinload
+from sqlalchemy.orm import joinedload, load_only, selectinload
 from sqlalchemy.sql import Select
 
 import prefect.server.models as models
@@ -191,16 +191,26 @@ async def read_flow_run(
     Returns:
         orm_models.FlowRun: the flow run
     """
+    if for_update:
+        # Lock before reading: a locking read that waits for another transaction
+        # re-checks only the locked row, and would join its new state id against
+        # the rows it saw before waiting.
+        await session.execute(
+            sa.select(db.FlowRun.id)
+            .where(db.FlowRun.id == flow_run_id)
+            .with_for_update()
+        )
+
+    # Every relationship loaded here is many-to-one, so joining them reads the
+    # flow run in one statement instead of one per relationship.
     select = (
         sa.select(db.FlowRun)
         .where(db.FlowRun.id == flow_run_id)
         .options(
-            selectinload(db.FlowRun.work_queue).selectinload(db.WorkQueue.work_pool)
+            joinedload(db.FlowRun._state).joinedload(db.FlowRunState._result_artifact),
+            joinedload(db.FlowRun.work_queue).joinedload(db.WorkQueue.work_pool),
         )
     )
-
-    if for_update:
-        select = select.with_for_update()
 
     result = await session.execute(select)
     return result.scalar()

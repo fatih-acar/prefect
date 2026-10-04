@@ -6,7 +6,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from prefect.server import models, schemas
-from prefect.server.database import orm_models
+from prefect.server.database import orm_models, provide_database_interface
 from prefect.server.exceptions import ObjectNotFoundError
 from prefect.server.schemas.core import TaskRunResult
 from prefect.types import KeyValueLabels
@@ -363,6 +363,51 @@ class TestReadFlowRun:
             session=session, flow_run_id=uuid4()
         )
         assert result is None
+
+    @pytest.mark.parametrize(
+        "for_update, expected_selects",
+        [(False, 1), (True, 2)],
+        ids=["read", "locking read"],
+    )
+    async def test_read_flow_run_loads_relationships_without_extra_selects(
+        self, flow, work_queue_1, session, for_update: bool, expected_selects: int
+    ):
+        flow_run = await models.flow_runs.create_flow_run(
+            session=session,
+            flow_run=schemas.core.FlowRun(
+                flow_id=flow.id,
+                work_queue_id=work_queue_1.id,
+                state=schemas.states.Running(),
+            ),
+        )
+        await session.commit()
+        session.expunge_all()
+
+        engine = await provide_database_interface().engine()
+        statements: list[str] = []
+
+        def record_statement(conn, cursor, statement, parameters, context, many):
+            statements.append(statement)
+
+        sa.event.listen(engine.sync_engine, "before_cursor_execute", record_statement)
+        try:
+            read_flow_run = await models.flow_runs.read_flow_run(
+                session=session, flow_run_id=flow_run.id, for_update=for_update
+            )
+            assert read_flow_run is not None
+            assert read_flow_run.state is not None
+            assert read_flow_run.state.type == schemas.states.StateType.RUNNING
+            assert read_flow_run.work_queue is not None
+            assert read_flow_run.work_queue.id == work_queue_1.id
+            assert read_flow_run.work_queue.work_pool is not None
+            assert read_flow_run.work_queue.work_pool.id == work_queue_1.work_pool_id
+        finally:
+            sa.event.remove(
+                engine.sync_engine, "before_cursor_execute", record_statement
+            )
+
+        selects = [s for s in statements if s.lstrip().upper().startswith("SELECT")]
+        assert len(selects) == expected_selects
 
 
 class TestReadFlowRuns:
