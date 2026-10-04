@@ -12,6 +12,7 @@ import pytest
 from prefect import flow
 from prefect._flow_run_suspension import (
     FlowRunSuspensionRequest,
+    _shared_observers,
     is_suspended_flow_run_state,
     observe_flow_run_suspension,
     observe_flow_run_suspension_async,
@@ -1189,3 +1190,88 @@ class TestFlowRunSuspendingObserver:
 
         async with observe_flow_run_suspension_async(flow_run_id, suspension_request):
             assert suspension_request.get_state() is suspended_state
+
+    @pytest.fixture
+    def recording_observer(self, monkeypatch):
+        class RecordingFlowRunSuspendingObserver:
+            instances: list["RecordingFlowRunSuspendingObserver"] = []
+
+            def __init__(self, on_suspended, **kwargs):
+                self.on_suspended = on_suspended
+                self.watched: list[uuid.UUID] = []
+                self.removed: list[uuid.UUID] = []
+                self.exited = False
+                self.instances.append(self)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc_info):
+                self.exited = True
+
+            async def watch_flow_run_id(self, flow_run_id):
+                self.watched.append(flow_run_id)
+
+            def remove_in_flight_flow_run_id(self, flow_run_id):
+                self.removed.append(flow_run_id)
+
+        monkeypatch.setattr(
+            "prefect._internal.observers.FlowRunSuspendingObserver",
+            RecordingFlowRunSuspendingObserver,
+        )
+        return RecordingFlowRunSuspendingObserver
+
+    async def test_concurrent_flow_runs_share_one_observer(self, recording_observer):
+        first_id, second_id = uuid.uuid4(), uuid.uuid4()
+
+        async with AsyncExitStack() as first:
+            await first.enter_async_context(
+                observe_flow_run_suspension_async(first_id, FlowRunSuspensionRequest())
+            )
+            async with observe_flow_run_suspension_async(
+                second_id, FlowRunSuspensionRequest()
+            ):
+                [observer] = recording_observer.instances
+                assert observer.watched == [first_id, second_id]
+
+            async for attempt in retry_asserts(max_attempts=20, delay=0.05):
+                with attempt:
+                    assert observer.removed == [second_id]
+            assert not observer.exited
+
+        assert observer.exited
+        assert observer.removed == [second_id, first_id]
+        assert _shared_observers == {}
+
+    async def test_observer_restarts_after_the_last_flow_run_exits(
+        self, recording_observer
+    ):
+        for _ in range(2):
+            async with observe_flow_run_suspension_async(
+                uuid.uuid4(), FlowRunSuspensionRequest()
+            ):
+                pass
+
+        assert [observer.exited for observer in recording_observer.instances] == [
+            True,
+            True,
+        ]
+        assert _shared_observers == {}
+
+    async def test_shared_observer_marks_only_the_suspended_flow_run(
+        self, recording_observer
+    ):
+        suspended_id, running_id = uuid.uuid4(), uuid.uuid4()
+        suspended_request, running_request = (
+            FlowRunSuspensionRequest(),
+            FlowRunSuspensionRequest(),
+        )
+        suspended_state = Suspended()
+
+        async with observe_flow_run_suspension_async(suspended_id, suspended_request):
+            async with observe_flow_run_suspension_async(running_id, running_request):
+                [observer] = recording_observer.instances
+                observer.on_suspended(suspended_id, suspended_state)
+
+        assert suspended_request.get_state() is suspended_state
+        assert running_request.get_state() is None
