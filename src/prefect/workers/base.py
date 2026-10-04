@@ -1598,26 +1598,28 @@ class BaseWorker(abc.ABC, Generic[C, V, R]):
                 self._submit_run_and_capture_errors, flow_run
             )
 
-            if readiness_result and not isinstance(readiness_result, Exception):
-                try:
-                    await self.client.update_flow_run(
-                        flow_run_id=flow_run.id,
-                        infrastructure_pid=str(readiness_result),
-                    )
-                except Exception:
-                    run_logger.exception(
-                        "An error occurred while setting the `infrastructure_pid` on "
-                        f"flow run {flow_run.id!r}. The flow run will "
-                        "not be cancellable."
-                    )
+            if isinstance(readiness_result, Exception):
+                # If the run is not ready to submit, release the concurrency slot
+                self._release_limit_slot(flow_run.id)
+            else:
+                # A worker that runs flows without separate infrastructure reports
+                # readiness without an identifier, and there is nothing to record.
+                if readiness_result:
+                    try:
+                        await self.client.update_flow_run(
+                            flow_run_id=flow_run.id,
+                            infrastructure_pid=str(readiness_result),
+                        )
+                    except Exception:
+                        run_logger.exception(
+                            "An error occurred while setting the `infrastructure_pid` on "
+                            f"flow run {flow_run.id!r}. The flow run will "
+                            "not be cancellable."
+                        )
 
                 run_logger.info(
                     f"Flow run '{flow_run.name}' submitted to infrastructure"
                 )
-
-            else:
-                # If the run is not ready to submit, release the concurrency slot
-                self._release_limit_slot(flow_run.id)
         else:
             self._release_limit_slot(flow_run.id)
         self._submitting_flow_run_ids.remove(flow_run.id)

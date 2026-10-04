@@ -755,6 +755,41 @@ async def test_worker_releases_limit_slot_when_aborting_a_change_to_pending(
     release_mock.assert_called_once_with(flow_run.id)
 
 
+async def test_worker_records_no_infrastructure_pid_when_started_without_one(
+    prefect_client: PrefectClient,
+    worker_deployment_wq1: WorkQueue,
+    work_pool: WorkPool,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    flow_run = await prefect_client.create_flow_run_from_deployment(
+        worker_deployment_wq1.id,
+        state=Scheduled(scheduled_time=now_fn("UTC") - timedelta(days=1)),
+    )
+
+    async def run_without_infrastructure(
+        self: object,
+        flow_run: FlowRun,
+        configuration: object,
+        task_status: anyio.abc.TaskStatus[int] | None = None,
+    ) -> BaseWorkerResult:
+        if task_status:
+            task_status.started()
+        return BaseWorkerResult(identifier="in-process", status_code=0)
+
+    release_mock = Mock()
+
+    async with WorkerTestImpl(work_pool_name=work_pool.name, limit=1) as worker:
+        monkeypatch.setattr(worker, "run", run_without_infrastructure.__get__(worker))
+        worker._release_limit_slot = release_mock
+        submitted_flow_runs = await worker.get_and_submit_flow_runs()
+
+    assert [run.id for run in submitted_flow_runs] == [flow_run.id]
+    # The slot is released once, when the run finishes, not when it starts.
+    release_mock.assert_called_once_with(flow_run.id)
+    flow_run = await prefect_client.read_flow_run(flow_run.id)
+    assert flow_run.infrastructure_pid is None
+
+
 async def test_worker_handles_double_release_gracefully(
     prefect_client: PrefectClient,
     worker_deployment_wq1: WorkQueue,
