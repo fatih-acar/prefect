@@ -596,6 +596,20 @@ class SecureFlowConcurrencySlots(FlowRunOrchestrationRule):
         ):
             return
 
+        try:
+            concurrency_limit_id = (
+                await deployments.read_deployment_concurrency_limit_id(
+                    session=context.session,
+                    deployment_id=context.run.deployment_id,
+                )
+            )
+        except ObjectNotFoundError:
+            await self.abort_transition("Deployment not found.")
+            return
+
+        if not concurrency_limit_id:
+            return
+
         deployment = await deployments.read_deployment(
             session=context.session,
             deployment_id=context.run.deployment_id,
@@ -932,35 +946,35 @@ class ReleaseFlowConcurrencySlots(FlowRunUniversalTransform):
         if not context.session or not context.run.deployment_id:
             return
 
+        try:
+            concurrency_limit_id = (
+                await deployments.read_deployment_concurrency_limit_id(
+                    session=context.session,
+                    deployment_id=context.run.deployment_id,
+                )
+            )
+        except ObjectNotFoundError:
+            concurrency_limit_id = None
+
         if (
             context.initial_state
             and context.initial_state.state_details.deployment_concurrency_lease_id
         ):
-            fallback_concurrency_limit_ids = None
-            deployment = await deployments.read_deployment(
-                session=context.session,
-                deployment_id=context.run.deployment_id,
-            )
-            if deployment and deployment.concurrency_limit_id:
-                fallback_concurrency_limit_ids = [deployment.concurrency_limit_id]
-
             await _release_concurrency_lease(
                 session=context.session,
                 lease_id=context.initial_state.state_details.deployment_concurrency_lease_id,
-                fallback_concurrency_limit_ids=fallback_concurrency_limit_ids,
+                fallback_concurrency_limit_ids=(
+                    [concurrency_limit_id] if concurrency_limit_id else None
+                ),
             )
             return
 
-        deployment = await deployments.read_deployment(
-            session=context.session,
-            deployment_id=context.run.deployment_id,
-        )
-        if not deployment or not deployment.concurrency_limit_id:
+        if not concurrency_limit_id:
             return
 
         slots_released = await concurrency_limits_v2.bulk_decrement_active_slots(
             session=context.session,
-            concurrency_limit_ids=[deployment.concurrency_limit_id],
+            concurrency_limit_ids=[concurrency_limit_id],
             slots=1,
         )
         if not slots_released:
@@ -1857,6 +1871,18 @@ class EnforceDeploymentConcurrencyOnLate(FlowRunOrchestrationRule):
             return
 
         if not context.run.deployment_id:
+            return
+
+        try:
+            concurrency_limit_id = (
+                await deployments.read_deployment_concurrency_limit_id(
+                    session=context.session,
+                    deployment_id=context.run.deployment_id,
+                )
+            )
+        except ObjectNotFoundError:
+            return
+        if not concurrency_limit_id:
             return
 
         deployment = await deployments.read_deployment(

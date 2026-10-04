@@ -476,6 +476,34 @@ async def read_deployment(
 
 
 @db_injector
+async def read_deployment_concurrency_limit_id(
+    db: PrefectDBInterface, session: AsyncSession, deployment_id: UUID
+) -> Optional[UUID]:
+    """Reads the id of a deployment's concurrency limit without loading the deployment.
+
+    Args:
+        session: A database session
+        deployment_id: a deployment id
+
+    Returns:
+        UUID: the concurrency limit id, or None if the deployment has no
+            concurrency limit
+
+    Raises:
+        ObjectNotFoundError: if the deployment does not exist
+    """
+    result = await session.execute(
+        select(db.Deployment.concurrency_limit_id).where(
+            db.Deployment.id == deployment_id
+        )
+    )
+    row = result.first()
+    if row is None:
+        raise ObjectNotFoundError(f"Deployment with id {deployment_id} not found.")
+    return row.concurrency_limit_id
+
+
+@db_injector
 async def read_deployment_by_name(
     db: PrefectDBInterface, session: AsyncSession, name: str, flow_name: str
 ) -> Optional[orm_models.Deployment]:

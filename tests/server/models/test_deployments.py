@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from prefect.server import models, schemas
 from prefect.server.database import orm_models
 from prefect.server.database.dependencies import provide_database_interface
+from prefect.server.exceptions import ObjectNotFoundError
 from prefect.server.schemas import filters, states
 from prefect.server.schemas.states import StateType
 from prefect.server.schemas.statuses import DeploymentStatus
@@ -447,6 +448,39 @@ class TestReadDeployment:
             session=session, deployment_id=str(uuid4())
         )
         assert result is None
+
+    async def test_read_deployment_concurrency_limit_id(
+        self, session, deployment_with_concurrency_limit
+    ):
+        concurrency_limit_id = (
+            await models.deployments.read_deployment_concurrency_limit_id(
+                session=session, deployment_id=deployment_with_concurrency_limit.id
+            )
+        )
+        assert concurrency_limit_id is not None
+        assert (
+            concurrency_limit_id
+            == deployment_with_concurrency_limit.concurrency_limit_id
+        )
+
+    async def test_read_deployment_concurrency_limit_id_returns_none_without_limit(
+        self, session, deployment
+    ):
+        assert deployment.concurrency_limit_id is None
+        concurrency_limit_id = (
+            await models.deployments.read_deployment_concurrency_limit_id(
+                session=session, deployment_id=deployment.id
+            )
+        )
+        assert concurrency_limit_id is None
+
+    async def test_read_deployment_concurrency_limit_id_raises_if_does_not_exist(
+        self, session
+    ):
+        with pytest.raises(ObjectNotFoundError):
+            await models.deployments.read_deployment_concurrency_limit_id(
+                session=session, deployment_id=uuid4()
+            )
 
     async def test_read_deployment_by_name(self, session, flow, flow_function):
         # create a deployment to read
