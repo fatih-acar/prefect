@@ -43,6 +43,8 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from packaging.version import Version
+from starlette.datastructures import Headers
+from starlette.types import ASGIApp, Receive, Scope, Send
 from typing_extensions import Self
 
 import prefect
@@ -265,6 +267,37 @@ def _is_html_navigation(request: Request) -> bool:
 
     accept = request.headers.get("accept", "").lower()
     return "text/html" in accept
+
+
+class DefaultContentTypeMiddleware:
+    """
+    A middleware that defaults the content type of request bodies to JSON.
+
+    Older Prefect clients (<3.6.19) sent JSON bodies via httpx's `content=`
+    parameter, which omits the Content-Type header, and FastAPI >=0.132.0
+    requires `Content-Type: application/json` to parse request bodies.
+
+    This is a pure ASGI middleware because `BaseHTTPMiddleware` runs every
+    request in a separate task and streams its response through a memory
+    stream, which costs more CPU than the rest of a simple request's framework
+    handling.
+    """
+
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and scope["method"] in {"POST", "PUT", "PATCH"}:
+            headers = Headers(scope=scope)
+            if (
+                "content-type" not in headers
+                and int(headers.get("content-length", "0")) > 0
+            ):
+                scope["headers"] = [
+                    *scope["headers"],
+                    (b"content-type", b"application/json"),
+                ]
+        await self.app(scope, receive, send)
 
 
 class RequestLimitMiddleware:
@@ -499,22 +532,7 @@ def create_api_app(
     if final:
         gc.collect()
 
-    @api_app.middleware("http")
-    async def default_content_type(request: Request, call_next: Any):  # type: ignore[reportUnusedFunction]
-        # Older Prefect clients (<3.6.19) sent JSON bodies via httpx's
-        # content= parameter, which omits the Content-Type header.
-        # FastAPI >=0.132.0 requires Content-Type: application/json to
-        # parse request bodies. Default it here for backward compat.
-        if (
-            request.method in {"POST", "PUT", "PATCH"}
-            and "content-type" not in request.headers
-            and int(request.headers.get("content-length", "0")) > 0
-        ):
-            request.scope["headers"] = [
-                *request.scope["headers"],
-                (b"content-type", b"application/json"),
-            ]
-        return await call_next(request)
+    api_app.add_middleware(DefaultContentTypeMiddleware)
 
     auth_string = prefect.settings.PREFECT_SERVER_API_AUTH_STRING.value()
 

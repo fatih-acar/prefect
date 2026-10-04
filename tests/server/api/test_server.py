@@ -13,8 +13,10 @@ import httpx
 import pytest
 import sqlalchemy as sa
 import toml
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
+from starlette.middleware.base import BaseHTTPMiddleware
 
 import prefect
 from prefect._internal.compatibility.starlette import status
@@ -25,6 +27,7 @@ from prefect.server.api.server import (
     API_ROUTERS,
     SQLITE_LOCKED_MSG,
     UI_STATIC_REFERENCE_FILE_NAME,
+    DefaultContentTypeMiddleware,
     SubprocessASGIServer,
     _memoize_block_auto_registration,
     _SQLiteLockedOperationalErrorFilter,
@@ -1016,6 +1019,51 @@ async def test_version_route(client):
     response = await client.get("/version")
     assert response.json() == SERVER_API_VERSION
     assert response.status_code == status.HTTP_200_OK
+
+
+class TestDefaultContentTypeMiddleware:
+    @pytest.fixture
+    async def echo_client(self):
+        app = FastAPI()
+        app.add_middleware(DefaultContentTypeMiddleware)
+
+        @app.api_route("/", methods=["GET", "POST", "PUT", "PATCH"])
+        async def echo(request: Request) -> dict[str, str | None]:
+            return {"content_type": request.headers.get("content-type")}
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            yield client
+
+    @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH"])
+    async def test_defaults_body_without_content_type_to_json(
+        self, echo_client: AsyncClient, method: str
+    ):
+        response = await echo_client.request(method, "/", content=b'{"a": 1}')
+        assert response.json() == {"content_type": "application/json"}
+
+    async def test_keeps_explicit_content_type(self, echo_client: AsyncClient):
+        response = await echo_client.post(
+            "/", content=b"a=1", headers={"content-type": "text/plain"}
+        )
+        assert response.json() == {"content_type": "text/plain"}
+
+    async def test_leaves_empty_body_without_content_type(
+        self, echo_client: AsyncClient
+    ):
+        response = await echo_client.post(
+            "/", content=b"", headers={"content-length": "0"}
+        )
+        assert response.json() == {"content_type": None}
+
+    async def test_leaves_get_without_content_type(self, echo_client: AsyncClient):
+        response = await echo_client.get("/")
+        assert response.json() == {"content_type": None}
+
+    def test_api_app_has_no_base_http_middleware_without_auth(self):
+        app = create_api_app(ignore_cache=True)
+        assert not [m for m in app.user_middleware if m.cls is BaseHTTPMiddleware]
 
 
 class TestCreateOrionAPI:
