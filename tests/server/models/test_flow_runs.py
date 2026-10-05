@@ -358,6 +358,28 @@ class TestReadFlowRun:
         )
         assert read_flow_run.job_variables == job_vars
 
+    @pytest.mark.parametrize("for_update", [False, True], ids=["read", "locking read"])
+    async def test_reads_each_flow_run_by_its_own_id(
+        self, flow, session, for_update: bool
+    ):
+        flow_runs = [
+            await models.flow_runs.create_flow_run(
+                session=session,
+                flow_run=schemas.core.FlowRun(flow_id=flow.id, name=name),
+            )
+            for name in ("first", "second")
+        ]
+
+        for flow_run in flow_runs:
+            read_flow_run = await models.flow_runs.read_flow_run(
+                session=session, flow_run_id=flow_run.id, for_update=for_update
+            )
+            assert read_flow_run is not None
+            assert (read_flow_run.id, read_flow_run.name) == (
+                flow_run.id,
+                flow_run.name,
+            )
+
     async def test_read_flow_run_returns_none_if_does_not_exist(self, session):
         result = await models.flow_runs.read_flow_run(
             session=session, flow_run_id=uuid4()

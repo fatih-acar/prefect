@@ -5,6 +5,7 @@ Intended for internal use by the Prefect REST API.
 
 import contextlib
 import datetime
+from functools import cache
 from itertools import chain
 from typing import (
     TYPE_CHECKING,
@@ -191,19 +192,35 @@ async def read_flow_run(
     Returns:
         orm_models.FlowRun: the flow run
     """
+    lock_statement, read_statement = _flow_run_by_id_statements(db)
+    parameters = {"flow_run_id": flow_run_id}
     if for_update:
         # Lock before reading: a locking read that waits for another transaction
         # re-checks only the locked row, and would join its new state id against
         # the rows it saw before waiting.
-        await session.execute(
-            sa.select(db.FlowRun.id)
-            .where(db.FlowRun.id == flow_run_id)
-            .with_for_update()
-        )
+        await session.execute(lock_statement, parameters)
 
+    result = await session.execute(read_statement, parameters)
+    return result.scalar()
+
+
+@cache
+def _flow_run_by_id_statements(
+    db: PrefectDBInterface,
+) -> tuple[Select[tuple[UUID]], Select[tuple[orm_models.FlowRun]]]:
+    """
+    Build the statements that lock and read one flow run by id.
+
+    They are built once per database interface, so a read does not build the
+    statement and its SQLAlchemy cache key again.
+    """
+    flow_run_id = sa.bindparam("flow_run_id")
+    lock_statement = (
+        sa.select(db.FlowRun.id).where(db.FlowRun.id == flow_run_id).with_for_update()
+    )
     # Every relationship loaded here is many-to-one, so joining them reads the
     # flow run in one statement instead of one per relationship.
-    select = (
+    read_statement = (
         sa.select(db.FlowRun)
         .where(db.FlowRun.id == flow_run_id)
         .options(
@@ -211,9 +228,7 @@ async def read_flow_run(
             joinedload(db.FlowRun.work_queue).joinedload(db.WorkQueue.work_pool),
         )
     )
-
-    result = await session.execute(select)
-    return result.scalar()
+    return lock_statement, read_statement
 
 
 async def _apply_flow_run_filters(
