@@ -441,6 +441,39 @@ async def test_ephemeral_subscription(broker: str, publisher: Publisher):
         assert not remaining_message
 
 
+async def test_ephemeral_subscription_reads_a_backlog_in_one_call(
+    broker: str, publisher: Publisher, monkeypatch: pytest.MonkeyPatch
+):
+    captured_messages: list[Message] = []
+
+    async def handler(message: Message):
+        captured_messages.append(message)
+        if len(captured_messages) == 5:
+            raise StopConsumer(ack=True)
+
+    original_xread = Redis.xread
+    xread_calls = 0
+
+    async def counting_xread(self: Redis, *args, **kwargs):
+        nonlocal xread_calls
+        xread_calls += 1
+        return await original_xread(self, *args, **kwargs)
+
+    async with ephemeral_subscription("message-tests") as consumer_kwargs:
+        async with publisher as p:
+            for index in range(5):
+                await p.publish_data(f"message {index}".encode(), {})
+
+        monkeypatch.setattr(Redis, "xread", counting_xread)
+        consumer = create_consumer(**consumer_kwargs)
+        await asyncio.wait_for(consumer.run(handler), timeout=10)
+
+    assert [message.data for message in captured_messages] == [
+        f"message {index}" for index in range(5)
+    ]
+    assert xread_calls == 1
+
+
 async def test_verify_ephemeral_cleanup(redis: Redis, broker: str):
     """Verify that ephemeral subscriptions do not create consumer groups."""
     async with ephemeral_subscription("message-tests") as consumer_kwargs:
@@ -540,8 +573,14 @@ async def test_ephemeral_subscription_trims_stream_without_consumer_groups(
         consumer_task = asyncio.create_task(consumer.run(handler))
 
         try:
+            # Published one at a time, so the consumer checks for trimming after each
+            # of two reads instead of reading both messages at once.
             async with publisher as p:
                 await p.publish_data(b"new", {"message": "new-1"})
+            with anyio.fail_after(10):
+                while not captured_messages:
+                    await asyncio.sleep(0.01)
+            async with publisher as p:
                 await p.publish_data(b"new", {"message": "new-2"})
         finally:
             await consumer_task

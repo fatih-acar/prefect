@@ -706,6 +706,11 @@ class Consumer(_Consumer):
             self._last_trimmed = now
 
 
+# An ephemeral subscriber reads every message of its stream, so reading one
+# message per XREAD costs a Redis round trip per message once it falls behind.
+EPHEMERAL_READ_BATCH_SIZE = 100
+
+
 @asynccontextmanager
 async def ephemeral_subscription(
     topic: str, source: Optional[str] = None, group: Optional[str] = None
@@ -731,6 +736,7 @@ async def ephemeral_subscription(
         "name": name,
         "starting_message_id": starting_message_id,
         "use_consumer_group": False,
+        "read_batch_size": EPHEMERAL_READ_BATCH_SIZE,
     }
 
 
