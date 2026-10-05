@@ -227,9 +227,9 @@ class Settings(PrefectBaseSettings):
     # allow deprecated access to PREFECT_SOME_SETTING_NAME
 
     def __getattribute__(self, name: str) -> Any:
-        from prefect.settings.legacy import _env_var_to_accessor
-
         if name.startswith("PREFECT_"):
+            from prefect.settings.legacy import _env_var_to_accessor
+
             accessor = _env_var_to_accessor(name)
             warnings.warn(
                 f"Accessing `Settings().{name}` is deprecated. Use `Settings().{accessor}` instead.",

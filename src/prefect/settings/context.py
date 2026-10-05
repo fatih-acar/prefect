@@ -1,13 +1,25 @@
 from contextlib import contextmanager
+from functools import cache
 from typing import TYPE_CHECKING, Any, Generator, Iterable, Mapping, Optional
 
 from prefect.settings.models.root import Settings
 
 if TYPE_CHECKING:
+    from prefect.context import SettingsContext
     from prefect.settings._types import SettingAccessor
     from prefect.settings.legacy import Setting
 
     SettingKey = Setting | SettingAccessor
+
+
+@cache
+def _settings_context_type() -> type["SettingsContext"]:
+    # Imported once, since `prefect.context` imports this module: an import on
+    # every call also raises an `AttributeError` in that module's `__getattr__`,
+    # which the import machinery asks for `__path__`.
+    from prefect.context import SettingsContext
+
+    return SettingsContext
 
 
 def get_current_settings() -> Settings:
@@ -15,9 +27,7 @@ def get_current_settings() -> Settings:
     Returns a settings object populated with values from the current settings context
     or, if no settings context is active, the environment.
     """
-    from prefect.context import SettingsContext
-
-    settings_context = SettingsContext.get()
+    settings_context = _settings_context_type().get()
     if settings_context is not None:
         return settings_context.settings
 
